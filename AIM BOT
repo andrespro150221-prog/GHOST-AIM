@@ -3,8 +3,8 @@
 -- Soporte: Delta (iOS/Android), Arceus X, Codex, PC
 -- =========================================================
 
-if _G.FlowLoaded then return end  
-_G.FlowLoaded = true  
+if _G.GhostLoaded then return end  
+_G.GhostLoaded = true  
   
 -- SERVICIOS Y SETUP  
 local Players          = game:GetService("Players")  
@@ -31,9 +31,266 @@ end
 
 local targetGui = getSafeGuiParent()
   
-if targetGui:FindFirstChild("FlowUI") then 
-    pcall(function() targetGui.FlowUI:Destroy() end)
-end  
+-- Limpia ejecuciones previas (por nombre interno y nombres protegidos)
+if targetGui:FindFirstChild("GhostUI") then 
+    pcall(function() targetGui.GhostUI:Destroy() end)
+end
+for _, existingGui in ipairs(targetGui:GetChildren()) do
+    if existingGui:IsA("ScreenGui") then
+        local n = existingGui.Name
+        if string.find(n, "RobloxMenu_") or string.find(n, "RobloxCore_") or string.find(n, "CoreGuiMenu") then
+            pcall(function() existingGui:Destroy() end)
+        end
+    end
+end
+
+-- ═══════════════════════════════════════════
+--  UIProtector — Protección de GUI embebida
+-- ═══════════════════════════════════════════
+local UIProtector = {}
+UIProtector.__index = UIProtector
+UIProtector._originals = {}
+
+function UIProtector:_randStr(len)
+    local out = ""
+    for _ = 1, len do
+        out = out .. string.char(math.random(65, 122))
+    end
+    return out
+end
+
+function UIProtector:_spoofName(guiObj)
+    local realName = guiObj.Name
+    local fakeName = "SettingsMenu_" .. tostring(math.random(100000, 999999))
+    guiObj.Name = fakeName
+    self._realName = realName
+    self._fakeName = fakeName
+    return fakeName
+end
+
+function UIProtector:_spoofExplorer(guiObj)
+    pcall(function()
+        for _, desc in ipairs(guiObj:GetDescendants()) do
+            pcall(function()
+                if desc:IsA("Frame") or desc:IsA("TextLabel") or
+                   desc:IsA("TextButton") or desc:IsA("ScrollingFrame") or
+                   desc:IsA("ImageLabel") or desc:IsA("UIStroke") then
+                    desc.Name = self:_randStr(math.random(5, 12))
+                end
+            end)
+        end
+        local conn
+        conn = guiObj.DescendantAdded:Connect(function(desc)
+            task.defer(function()
+                if not self._active then
+                    if conn then conn:Disconnect() end
+                    return
+                end
+                pcall(function()
+                    if desc:IsA("Frame") or desc:IsA("TextLabel") or
+                       desc:IsA("TextButton") or desc:IsA("ScrollingFrame") or
+                       desc:IsA("ImageLabel") or desc:IsA("UIStroke") then
+                        desc.Name = self:_randStr(math.random(5, 12))
+                    end
+                end)
+            end)
+        end)
+        table.insert(self._connections, conn)
+    end)
+end
+
+function UIProtector:_antiScreenshot(guiObj)
+    pcall(function()
+        local CoreGui = game:GetService("CoreGui")
+        local oldGetChildren = CoreGui.GetChildren
+        self._originals.CoreGuiGetChildren = oldGetChildren
+        CoreGui.GetChildren = function(self, ...)
+            local result = oldGetChildren(self, ...)
+            local filtered = {}
+            for _, v in ipairs(result) do
+                if v ~= guiObj then table.insert(filtered, v) end
+            end
+            return filtered
+        end
+        local oldGetDescendants = CoreGui.GetDescendants
+        self._originals.CoreGuiGetDescendants = oldGetDescendants
+        CoreGui.GetDescendants = function(self, ...)
+            local result = oldGetDescendants(self, ...)
+            local filtered = {}
+            for _, v in ipairs(result) do
+                if v ~= guiObj and not v:IsDescendantOf(guiObj) then table.insert(filtered, v) end
+            end
+            return filtered
+        end
+    end)
+end
+
+function UIProtector:_antiTamper(guiObj, onTamper)
+    local conn = guiObj.Destroying:Connect(function()
+        if self._active then
+            pcall(function()
+                task.defer(function()
+                    if self._active then
+                        self._active = false
+                        if onTamper then onTamper() end
+                    end
+                end)
+            end)
+        end
+    end)
+    table.insert(self._connections, conn)
+end
+
+function UIProtector:_descendantWatcher(guiObj, sensitiveNames)
+    local conn = guiObj.DescendantAdded:Connect(function(desc)
+        task.defer(function()
+            if not self._active then return end
+            for _, name in ipairs(sensitiveNames or {}) do
+                if desc.Name and string.find(desc.Name, name) then
+                    desc.Name = self:_randStr(math.random(6, 14))
+                end
+            end
+            if desc:IsA("LocalScript") or desc:IsA("ModuleScript") then
+                desc.Name = self:_randStr(math.random(6, 12))
+            end
+        end)
+    end)
+    table.insert(self._connections, conn)
+end
+
+function UIProtector:_obfuscateText(guiObj, sensitiveNames)
+    pcall(function()
+        for _, desc in ipairs(guiObj:GetDescendants()) do
+            if desc:IsA("TextLabel") or desc:IsA("TextButton") then
+                local txt = desc.Text or ""
+                for _, name in ipairs(sensitiveNames or {}) do
+                    if string.find(txt, name) then
+                        local out = ""
+                        for i = 1, #txt do
+                            out = out .. string.sub(txt, i, i)
+                            if i < #txt and math.random() > 0.5 then
+                                out = out .. string.char(0xE2, 0x80, 0x8B)
+                            end
+                        end
+                        desc.Text = out
+                        break
+                    end
+                end
+            end
+        end
+    end)
+end
+
+function UIProtector:_sanitizeNames(guiObj, sensitiveNames)
+    pcall(function()
+        for _, child in ipairs(guiObj:GetChildren()) do
+            for _, name in ipairs(sensitiveNames or {}) do
+                if child.Name and string.find(child.Name, name) then
+                    child.Name = self:_randStr(math.random(6, 14))
+                end
+            end
+        end
+    end)
+end
+
+function UIProtector:new(guiObj, config)
+    local self = setmetatable({}, UIProtector)
+    self._gui = guiObj
+    self._active = true
+    self._connections = {}
+    self._config = config or {}
+    self._sensitiveNames = self._config.sensitiveNames or {
+        "GhostUI", "AimLock", "Aimbot", "ESP", "Hitbox",
+        "GhostCham", "GHOST", "AutoShoot", "Ghost",
+    }
+    self:_spoofName(guiObj)
+    self:_spoofExplorer(guiObj)
+    if self._config.antiScreenshot ~= false then
+        self:_antiScreenshot(guiObj)
+    end
+    if self._config.antiTamper ~= false then
+        self:_antiTamper(guiObj, self._config.onTamper)
+    end
+    self:_descendantWatcher(guiObj, self._sensitiveNames)
+    return self
+end
+
+function UIProtector:finalize()
+    self:_sanitizeNames(self._gui, self._sensitiveNames)
+    self:_obfuscateText(self._gui, self._sensitiveNames)
+end
+
+function UIProtector:destroy()
+    self._active = false
+    for _, conn in ipairs(self._connections) do
+        pcall(function() conn:Disconnect() end)
+    end
+    self._connections = {}
+    pcall(function()
+        if self._originals.CoreGuiGetChildren then
+            game:GetService("CoreGui").GetChildren = self._originals.CoreGuiGetChildren
+        end
+    end)
+    pcall(function()
+        if self._originals.CoreGuiGetDescendants then
+            game:GetService("CoreGui").GetDescendants = self._originals.CoreGuiGetDescendants
+        end
+    end)
+    pcall(function()
+        if self._realName then
+            self._gui.Name = self._realName
+        end
+    end)
+end
+
+-- ═══════════════════════════════════════════
+--  ServiceResolver — Resolución segura de servicios (embebido)
+--  Solo resolución pasiva, SIN hooks (más seguro contra detección)
+-- ═══════════════════════════════════════════
+local ServiceResolver = {}
+ServiceResolver.__index = ServiceResolver
+
+function ServiceResolver.new()
+    return setmetatable({_active = true, _cache = {}}, ServiceResolver)
+end
+
+function ServiceResolver:Get(serviceName)
+    if self._cache[serviceName] then return self._cache[serviceName] end
+    local service = nil
+    local ok, result = pcall(function()
+        return game:GetService(serviceName)
+    end)
+    if ok and result then
+        service = result
+    end
+    if not service then
+        ok, result = pcall(function()
+            return game:FindService(serviceName)
+        end)
+        if ok and result then service = result end
+    end
+    if not service then
+        ok, result = pcall(function()
+            return rawget(game, serviceName)
+        end)
+        if ok and result then service = result end
+    end
+    if service then self._cache[serviceName] = service end
+    return service
+end
+
+-- Inicialización sin hooks (passive)
+function ServiceResolver:Initialize()
+    -- Modo pasivo: no se hookea nada del juego
+end
+
+function ServiceResolver:Destroy()
+    self._active = false
+    self._cache = {}
+end
+
+-- Referencia rápida a servicios (sin hooks)
+local SR = ServiceResolver.new()  
   
 -- ── Configuraciones ──  
 local Config = {  
@@ -150,7 +407,7 @@ local function updateESP()
                     end  
                     pcall(function()
                         local h = Instance.new("Highlight")  
-                        h.Name = "FlowCham"  
+                        h.Name = "Ch_" .. tostring(math.random(100,999))  
                         h.Adornee = char  
                         h.FillColor = isEnemy(player) and Color3.fromRGB(255, 45, 85) or Color3.fromRGB(45, 255, 85)
                         h.OutlineColor = isEnemy(player) and Color3.fromRGB(120, 20, 40) or Color3.fromRGB(20, 120, 40)  
@@ -205,6 +462,7 @@ local function updateESP()
         end  
     end  
 end  
+  
   
 -- ── Mira ──  
 local fovCircle, centerDot
@@ -271,12 +529,28 @@ local function Tween(obj, props, duration)
 end  
   
 local Gui = Instance.new("ScreenGui")  
-Gui.Name = "FlowUI"  
+Gui.Name = "GhostUI"  
 Gui.ResetOnSpawn = false  
 Gui.ZIndexBehavior = Enum.ZIndexBehavior.Global  
 Gui.IgnoreGuiInset = true  
 Gui.DisplayOrder = 999  
-Gui.Parent = targetGui  
+Gui.Parent = targetGui
+
+-- ── Activar Protección UI ──
+local _uiSvc = UIProtector.new(Gui, {
+    sensitiveNames = {
+        "GhostUI", "AimLock", "Aimbot", "ESP", "Hitbox",
+        "GhostCham", "GHOST", "AutoShoot", "Ghost",
+    },
+    antiScreenshot = false,
+    onTamper = function()
+        ScriptActive = false
+        _G.GhostLoaded = nil
+    end,
+})
+
+-- Inicializar ServiceResolver en modo pasivo (sin hooks)
+SR:Initialize()  
   
 local Container = Instance.new("Frame")  
 Container.Name = "MainContainer"  
@@ -361,7 +635,7 @@ DragHandle.ZIndex = 5
 DragHandle.Parent = TopBar  
   
 local Title = Instance.new("TextLabel")  
-Title.Text                   = "GHOST AIM"  
+Title.Text                   = "Menu"  
 if typeof(TitleFont) == "Font" then
     Title.FontFace = TitleFont
 else
@@ -509,7 +783,7 @@ MobileToggleBtn.Size = UDim2.new(0, 52, 0, 52)
 MobileToggleBtn.Position = UDim2.new(0, 20, 0, 80)
 MobileToggleBtn.BackgroundColor3 = Theme.Accent
 MobileToggleBtn.TextColor3 = Theme.Black
-MobileToggleBtn.Text = "FLOW"
+MobileToggleBtn.Text = string.char(0xE2, 0x9A, 0x99)
 MobileToggleBtn.Font = Enum.Font.GothamBold
 MobileToggleBtn.TextSize = 11
 MobileToggleBtn.ZIndex = 999
@@ -945,7 +1219,7 @@ local function createKeyBind(text, order, defaultKey, onTriggered)
 end
   
 -- ── Construir Opciones ──  
-createSection("Aimbot Config", 1)
+createSection("Configuracion", 1)
 
 local aimModeValueLabel = createCycle("Modo de Apuntado", 2, {"MANUAL", "AUTO"}, function(v)
     Config.AimMode = v
@@ -985,9 +1259,10 @@ createToggle("Lock Automatico", 10, true, function(v) Config.TargetLock = v end)
 createToggle("Wall Check (No Paredes)", 11, true, function(v) Config.WallCheck = v end)  
 createToggle("Team Check", 12, true, function(v) Config.TeamCheck = v end)  
   
-createSection("Visuals", 13)  
-createToggle("ESP Players", 14, true, function(v) Config.ShowESP = v end)  
-createToggle("Show Mira (FOV)", 15, true, function(v) Config.ShowFOV = v end)  
+createSection("Visuales", 13)  
+createToggle("Ver Jugadores", 14, true, function(v) Config.ShowESP = v end)  
+createToggle("Mostrar Mira (FOV)", 15, true, function(v) Config.ShowFOV = v end)  
+  
   
 -- ═══════════════════════════════════════════  
 --  MINIMIZAR / CERRAR  
@@ -1030,8 +1305,10 @@ end)
   
 CloseBtn.Activated:Connect(function()  
     if isClosing then return end  
-    isClosing = true  
-    ScriptActive = false  
+    isClosing = true
+    ScriptActive = false
+    _uiSvc:destroy()
+    SR:Destroy()
     for _, player in ipairs(Players:GetPlayers()) do   
         removeESP(player)  
         if HighlightCache[player] then  
@@ -1059,11 +1336,13 @@ CloseBtn.Activated:Connect(function()
         end)  
     end  
     task.wait(0.15)  
-    _G.FlowLoaded = nil  
+    _G.GhostLoaded = nil  
     Gui:Destroy()  
 end)  
   
--- ── Animación de Entrada ──  
+-- ── Animación de Entrada ──
+_uiSvc:finalize()
+
 Container.Size = UDim2.new(0, defaultW * 0.95, 0, defaultH * 0.95)  
 Container.Position = UDim2.new(0, centerX + defaultW * 0.025, 0, centerY + defaultH * 0.025)  
 task.wait(0.05)  
@@ -1184,6 +1463,5 @@ local mainLoop = RunService.RenderStepped:Connect(function(dt)
         if centerDot then centerDot.Color = Theme.Glow end
     end  
     updateESP()  
-end)  
-  
+end)
 Players.PlayerRemoving:Connect(function(player) removeESP(player) end)
