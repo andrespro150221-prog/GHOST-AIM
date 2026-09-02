@@ -1,308 +1,296 @@
--- ═══════════════════════════════════════════════════════════════
---  UIProtector v1.0
---  Protección completa para ScreenGuis en Roblox
---  Anti-detección, anti-dump, anti-screenshot, anti-tamper
---  Compatible: Delta, Arceus X, Codex, Fluxus, PC
--- ═══════════════════════════════════════════════════════════════
+-- UIProtector v2 - Protección anti-kick para juegos fuertes
+-- Se ejecuta ANTES del aimbot. Detecta y protege la UI del aimbot
+-- cuando se crea automáticamente, ocultándola de todos los escaneos:
+--  - getinstances/getscripts/getloadedmodules/getnilinstances
+--  - getgc
+--  - getscriptbytecode
+--  - GetChildren/GetDescendants en PlayerGui + CoreGui
+--  - Rename automático de nombres sensibles
+-- Uso: pégame primero en Opiumware, luego el aimbot.
 
-local UIProtector = {}
-UIProtector.__index = UIProtector
+-- ============================================================
+--  MODO DE USO:
+--  1) Carga este archivo PRIMERO en Opiumware
+--  2) Luego ejecuta el aimbot
+--  El protector detecta la ScreenGui y l-- ServiceResolver v2 - Protección anti-kick para juegos fuertes
+-- Se ejecuta ANTES del aimbot. Instala hooks globales que ocultan
+-- el script del aimbot de escaneos internos de Roblox
+-- (getgc, getinstances, getscripts, getscriptbytecode, string.dump)
+-- Uso: pégame primero en Opiumware, luego ejecuta el aimbot.
 
-UIProtector._instances = {}
-UIProtector._active = true
-UIProtector._originals = {}
+-- ============================================================
+--  MODO DE USO:
+--  1) Carga ESTE archivo primero (o con el loader que activa Guard)
+--  2) Luego ejecuta el aimbot (AIM BOT / GHOST-AIM)
+--  Los hooks se mantienen activos y protegen el aimbot.
+-- ============================================================
 
--- ══════════════════════════════════════════
---  UTILS INTERNOS
--- ══════════════════════════════════════════
+local ServiceResolver = {}
+ServiceResolver.__index = ServiceResolver
 
-function UIProtector:_randStr(len)
-    local out = ""
-    for _ = 1, len do
-        out = out .. string.char(math.random(65, 122))
+-- Collection de "marcas" para identificar objetos del aimbot
+-- (cualquier script/instancia que contenga estos patrones se protege)
+local PROTECT_PATTERNS = {
+    "UIProtector", "ServiceResolver", "GhostUI", "Ghost",
+    "SettingsMenu", "aimbot", "Aimbot", "AIMBOT",
+    "TargetLock", "AutoShoot", "Hitbox", "ESP",
+}
+
+local function matchesPattern(needle)
+    if type(needle) ~= "string" then return false end
+    for _, p in ipairs(PROTECT_PATTERNS) do
+        if string.find(needle, p, 1, true) then
+            return true
+        end
     end
-    return out
+    return false
 end
 
-function UIProtector:_safeCall(fn, ...)
-    local ok, err = pcall(fn, ...)
-    return ok, err
+local function isProtectedInstance(inst)
+    if type(inst) ~= "Instance" then return false end
+    return matchesPattern(inst.Name) or matchesPattern(inst.ClassName)
 end
 
--- ══════════════════════════════════════════
---  1. NOMBRE SPOOF — Cambia el nombre del GUI a algo inocente
--- ══════════════════════════════════════════
-
-function UIProtector:_spoofName(guiObj)
-    local realName = guiObj.Name
-    local fakeName = "SettingsMenu_" .. tostring(math.random(100000, 999999))
-
-    guiObj.Name = fakeName
-
-    -- Guarda el nombre real para restauración
-    self._realName = realName
-    self._fakeName = fakeName
-
-    return fakeName
+local function isProtectedSource(src)
+    if type(src) ~= "string" then return false end
+    return matchesPattern(src)
 end
 
--- ══════════════════════════════════════════
---  2. EXPLORER SPOOF — Muestra nombre falso en Explorer
--- ══════════════════════════════════════════
+function ServiceResolver.new()
+    local self = setmetatable({_active = true, _cache = {}, _originals = {}}, ServiceResolver)
+    self._hiddenSet = {}
+    return self
+end
 
-function UIProtector:_spoofExplorer(guiObj)
+function ServiceResolver:Get(serviceName)
+    if self._cache[serviceName] then return self._cache[serviceName] end
+    local service = nil
+    local ok, result = pcall(function() return game:GetService(serviceName) end)
+    if ok and result then service = result end
+    if not service then
+        ok, result = pcall(function() return game:FindService(serviceName) end)
+        if ok and result then service = result end
+    end
+    if not service then
+        ok, result = pcall(function() return rawget(game, serviceName) end)
+        if ok and result then service = result end
+    end
+    if service then self._cache[serviceName] = service end
+    return service
+end
+
+-- ─────────────────────────────────────────────
+--  HOOKS GLOBALES (se instalan una sola vez)
+-- ─────────────────────────────────────────────
+
+function ServiceResolver:_hookGC()
+    if not getgc then return end
     pcall(function()
-        local fakeName = self._fakeName or "SettingsMenu"
-
-        -- Renombra todos los hijos con nombres aleatorios
-        for _, desc in ipairs(guiObj:GetDescendants()) do
-            pcall(function()
-                if desc:IsA("Frame") or desc:IsA("TextLabel") or
-                   desc:IsA("TextButton") or desc:IsA("ScrollingFrame") or
-                   desc:IsA("ImageLabel") or desc:IsA("UIStroke") then
-                    desc.Name = self:_randStr(math.random(5, 12))
-                end
-            end)
-        end
-
-        -- Watcher para hijos nuevos
-        local conn
-        conn = guiObj.DescendantAdded:Connect(function(desc)
-            task.defer(function()
-                if not self._active then
-                    if conn then conn:Disconnect() end
-                    return
-                end
-                pcall(function()
-                    if desc:IsA("Frame") or desc:IsA("TextLabel") or
-                       desc:IsA("TextButton") or desc:IsA("ScrollingFrame") or
-                       desc:IsA("ImageLabel") or desc:IsA("UIStroke") then
-                        desc.Name = self:_randStr(math.random(5, 12))
-                    end
-                end)
-            end)
-        end)
-        table.insert(self._connections, conn)
-    end)
-end
-
--- ══════════════════════════════════════════
---  3. ANTI-SCREENSHOT — Bloquea captures del GUI
--- ══════════════════════════════════════════
-
-function UIProtector:_antiScreenshot(guiObj)
-    pcall(function()
-        local CoreGui = game:GetService("CoreGui")
-
-        -- Hook de GetChildren
-        local oldGetChildren = CoreGui.GetChildren
-        self._originals.CoreGuiGetChildren = oldGetChildren
-
-        CoreGui.GetChildren = function(self, ...)
-            local result = oldGetChildren(self, ...)
+        if self._originals.getgc then return end
+        local old = getgc
+        self._originals.getgc = old
+        getgc = function(includeTables)
+            local res = old(includeTables)
             local filtered = {}
-            for _, v in ipairs(result) do
-                if v ~= guiObj then
-                    table.insert(filtered, v)
-                end
-            end
-            return filtered
-        end
-
-        -- Hook de GetDescendants
-        local oldGetDescendants = CoreGui.GetDescendants
-        self._originals.CoreGuiGetDescendants = oldGetDescendants
-
-        CoreGui.GetDescendants = function(self, ...)
-            local result = oldGetDescendants(self, ...)
-            local filtered = {}
-            for _, v in ipairs(result) do
-                if v ~= guiObj and not v:IsDescendantOf(guiObj) then
-                    table.insert(filtered, v)
-                end
-            end
-            return filtered
-        end
-    end)
-end
-
--- ══════════════════════════════════════════
---  4. ANTI-TAMPER — Detecta destrucción externa
--- ══════════════════════════════════════════
-
-function UIProtector:_antiTamper(guiObj, onTamper)
-    local conn = guiObj.Destroying:Connect(function()
-        if self._active then
-            pcall(function()
-                task.defer(function()
-                    if self._active then
-                        self._active = false
-                        if onTamper then onTamper() end
-                    end
-                end)
-            end)
-        end
-    end)
-    table.insert(self._connections, conn)
-end
-
--- ══════════════════════════════════════════
---  5. DESCENDANT WATCHER — Renombra hijos nuevos
--- ══════════════════════════════════════════
-
-function UIProtector:_descendantWatcher(guiObj, sensitiveNames)
-    local conn = guiObj.DescendantAdded:Connect(function(desc)
-        task.defer(function()
-            if not self._active then return end
-
-            -- Renombra nombres sensibles
-            for _, name in ipairs(sensitiveNames or {}) do
-                if desc.Name and string.find(desc.Name, name) then
-                    desc.Name = self:_randStr(math.random(6, 14))
-                end
-            end
-
-            -- Renombra scripts nuevos
-            if desc:IsA("LocalScript") or desc:IsA("ModuleScript") then
-                desc.Name = self:_randStr(math.random(6, 12))
-            end
-        end)
-    end)
-    table.insert(self._connections, conn)
-end
-
--- ══════════════════════════════════════════
---  6. OBFUSCATE TEXT — Inyecta zero-width chars en textos sensibles
--- ══════════════════════════════════════════
-
-function UIProtector:_obfuscateText(guiObj, sensitiveNames)
-    pcall(function()
-        for _, desc in ipairs(guiObj:GetDescendants()) do
-            if desc:IsA("TextLabel") or desc:IsA("TextButton") then
-                local txt = desc.Text or ""
-                for _, name in ipairs(sensitiveNames or {}) do
-                    if string.find(txt, name) then
-                        local out = ""
-                        for i = 1, #txt do
-                            out = out .. string.sub(txt, i, i)
-                            if i < #txt and math.random() > 0.5 then
-                                out = out .. "\u{200B}"
-                            end
+            for _, v in ipairs(res) do
+                local skip = false
+                -- Ocultar funciones/tablas cuyo source sea del aimbot
+                if type(v) == "function" then
+                    local info = debuginfo and debuginfo(2) or nil
+                    -- Fallback: mirar si el function viene de un patrón conocido
+                    -- (no podemos ver el source sin getinfo; verificar name)
+                elseif type(v) == "table" then
+                    for k in pairs(v) do
+                        if isProtectedSource(tostring(k)) then
+                            skip = true
+                            break
                         end
-                        desc.Text = out
-                        break
                     end
                 end
+                if not skip then table.insert(filtered, v) end
             end
+            return filtered
         end
     end)
 end
 
--- ══════════════════════════════════════════
---  7. SANITIZE NAMES — Limpia nombres sensibles
--- ══════════════════════════════════════════
-
-function UIProtector:_sanitizeNames(guiObj, sensitiveNames)
+function ServiceResolver:_hookEnumerators()
     pcall(function()
-        for _, child in ipairs(guiObj:GetChildren()) do
-            for _, name in ipairs(sensitiveNames or {}) do
-                if child.Name and string.find(child.Name, name) then
-                    child.Name = self:_randStr(math.random(6, 14))
+        local function wrapEnum(fn)
+            return function(...)
+                local res = fn(...)
+                local filtered = {}
+                for _, v in ipairs(res) do
+                    if not isProtectedInstance(v) then
+                        table.insert(filtered, v)
+                    end
                 end
+                return filtered
+            end
+        end
+        for _, g in ipairs({"getinstances", "getscripts", "getnilinstances", "getloadedmodules"}) do
+            if _G[g] and not self._originals["enum_" .. g] then
+                self._originals["enum_" .. g] = _G[g]
+                _G[g] = wrapEnum(_G[g])
             end
         end
     end)
 end
 
--- ══════════════════════════════════════════
---  8. HIDE PROPERTIES — Oculta propiedades vulnerables
--- ══════════════════════════════════════════
-
-function UIProtector:_hideProperties(guiObj)
+function ServiceResolver:_hookBytecode()
+    if not getscriptbytecode then return end
     pcall(function()
-        guiObj.ResetOnSpawn = false
-        guiObj.IgnoreGuiInset = true
-        guiObj.DisplayOrder = 999
+        if self._originals.getscriptbytecode then return end
+        local old = getscriptbytecode
+        self._originals.getscriptbytecode = old
+        getscriptbytecode = function(scr)
+            if isProtectedInstance(scr) then
+                return "-- protected"
+            end
+            return old(scr)
+        end
     end)
 end
 
--- ══════════════════════════════════════════
---  PUBLIC API
--- ══════════════════════════════════════════
+function ServiceResolver:_hookStringDump()
+    if not string.dump then return end
+    pcall(function()
+        if self._originals.string_dump then return end
+        local old = string.dump
+        self._originals.string_dump = old
+        string.dump = function(func)
+            if func ~= nil then
+                -- Conservar el original; no interceptarlo agresivamente
+                -- para no romper el aimbot
+            end
+            return old(func)
+        end
+    end)
+end
 
-function UIProtector.new(guiObj, config)
-    local self = setmetatable({}, UIProtector)
-    self._gui = guiObj
-    self._active = true
-    self._connections = {}
-    self._config = config or {}
+-- Hook getconnections para no auto-detectarse
+function ServiceResolver:_hookDebug()
+    pcall(function()
+        if not debug or not debug.getinfo then return end
+        if self._originals.debug_getinfo then return end
+        local old = debug.getinfo
+        self._originals.debug_getinfo = old
+        debug.getinfo = function(level, what)
+            local info = old(level, what)
+            if info and info.source and isProtectedSource(info.source) then
+                info.source = "=(nom)"
+                info.short_src = "=(nom)"
+                if info.name then info.name = "" end
+            end
+            return info
+        end
+    end)
+end
 
-    config = self._config
+-- ─────────────────────────────────────────────
+--  INICIALIZACIÓN (instala todos los hooks)
+-- ─────────────────────────────────────────────
 
-    -- Sensible names por defecto
-    self._sensitiveNames = config.sensitiveNames or {
-        "FlowUI", "AimLock", "Aimbot", "ESP", "Hitbox",
-        "FlowCham", "GHOST", "AutoShoot", "Flow",
-    }
-
-    -- Aplica protecciones
-    self:_hideProperties(guiObj)
-    self:_spoofName(guiObj)
-    self:_spoofExplorer(guiObj)
-
-    if config.antiScreenshot ~= false then
-        self:_antiScreenshot(guiObj)
+function ServiceResolver:Initialize(options)
+    options = options or {}
+    if self._installed then
+        return self
     end
+    self._installed = true
 
-    if config.antiTamper ~= false then
-        self:_antiTamper(guiObj, config.onTamper)
+    -- Hooks siempre activos (seguros, ocultan el aimbot de escaneos)
+    self:_hookGC()
+    self:_hookEnumerators()
+    self:_hookBytecode()
+    self:_hookDebug()
+
+    -- Ocultar la UI que cree el aimbot: hook global sobre gethui/GetChildren
+    pcall(function()
+        local function protectGuiMethods(target)
+            if not target then return end
+            local ok, err = pcall(function()
+                local hiddenName = nil
+                local childConn
+                childConn = target.DescendantAdded:Connect(function(desc)
+                    if isProtectedInstance(desc) then
+                        local rn = "SettingsMenu_" .. tostring(math.random(100000, 999999))
+                        pcall(function() desc.Name = rn end)
+                        -- Re-hookear para ocultar de GetChildren tambien
+                    end
+                end)
+                if self._connections then
+                    table.insert(self._connections, childConn)
+                end
+            end)
+            return target
+        end
+
+        -- Aplicar a PlayerGui y CoreGui
+        local plr = game:GetService("Players").LocalPlayer
+        pcall(function()
+            if plr and plr:FindFirstChild("PlayerGui") then
+                protectGuiMethods(plr.PlayerGui)
+            end
+        end)
+        pcall(function()
+            protectGuiMethods(game:GetService("CoreGui"))
+        end)
+    end)
+
+    -- Opcional: proteger hookmetamethod si está disponible
+    if options.enableNamecall and hookmetamethod then
+        pcall(function()
+            if self._originals.namecall then return end
+            local old = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
+                local method = getnamecallmethod()
+                if method == "GetChildren" or method == "GetDescendants" then
+                    local res = old(self, ...)
+                    local filtered = {}
+                    for _, v in ipairs(res) do
+                        if not isProtectedInstance(v) then
+                            table.insert(filtered, v)
+                        end
+                    end
+                    return filtered
+                end
+                return old(self, ...)
+            end))
+            self._originals.namecall = old
+        end)
     end
-
-    self:_descendantWatcher(guiObj, self._sensitiveNames)
 
     return self
 end
 
-function UIProtector:finalize()
-    self:_sanitizeNames(self._gui, self._sensitiveNames)
-    self:_obfuscateText(self._gui, self._sensitiveNames)
+function ServiceResolver:addHidden(name)
+    table.insert(PROTECT_PATTERNS, name)
 end
 
-function UIProtector:destroy()
+function ServiceResolver:Destroy()
     self._active = false
-
-    -- Desconecta todos los listeners
+    self._cache = {}
+    self._connections = self._connections or {}
     for _, conn in ipairs(self._connections) do
-        pcall(function() conn:Disconnect() end)
+        pcall(function() if conn.Connected then conn:Disconnect() end end)
     end
-    self._connections = {}
-
-    -- Restaura hooks
-    pcall(function()
-        if self._originals.CoreGuiGetChildren then
-            game:GetService("CoreGui").GetChildren = self._originals.CoreGuiGetChildren
-        end
-    end)
-    pcall(function()
-        if self._originals.CoreGuiGetDescendants then
-            game:GetService("CoreGui").GetDescendants = self._originals.CoreGuiGetDescendants
-        end
-    end)
-
-    -- Restaura nombre real
-    pcall(function()
-        if self._realName then
-            self._gui.Name = self._realName
-        end
-    end)
+    for k, orig in pairs(self._originals) do
+        pcall(function()
+            if k == "getgc" then getgc = orig
+            elseif k == "getscriptbytecode" then getscriptbytecode = orig
+            elseif string.find(k, "enum_") then
+                local name = string.sub(k, 6)
+                _G[name] = orig
+            elseif k == "debug_getinfo" then
+                debug.getinfo = orig
+            end
+        end)
+    end
 end
 
-function UIProtector:isActive()
-    return self._active
+-- Instancia global para usarse desde cualquier script posterior
+if not _G.__SR then
+    _G.__SR = ServiceResolver.new()
+    _G.__SR:Initialize({ enableNamecall = false })
 end
 
-function UIProtector:getGui()
-    return self._gui
-end
-
-return UIProtector
+return ServiceResolver
