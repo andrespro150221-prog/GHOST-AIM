@@ -27,6 +27,17 @@ local GUI_MARKS = {
     _D(99,104,97,109), _D(101,115,112), _D(99,111,110,102,105,103),
     _D(118,105,115,117,97,108), _D(109,101,110,117), _D(99,111,110,116,97,105,110,101,114),
     _D(108,111,99,107), _D(117,105),
+    _D(102,108,111,119),     -- flow (FlowUI / FlowCham / FlowLoaded)
+    _D(109,97,105,110),      -- main (MainContainer)
+    _D(116,111,103,103,108,101),  -- toggle (MobileToggleBtn)
+    _D(109,111,98,105,108,101),   -- mobile
+    _D(100,114,97,103),      -- drag
+    _D(115,99,114,111,108,108),   -- scroll
+    _D(107,101,121),         -- key
+    _D(99,104,97,109,115),   -- chams
+    _D(115,101,116,116,105,110,103,115),
+    _D(119,97,108,108),      -- wall
+    _D(97,117,116,111,102,105,114,101),  -- autofire
 }
 
 local function _m(s)
@@ -183,6 +194,70 @@ function UIProtector:startWatching()
         end
     end)
     pcall(function() self:_watch(CoreGui) end)
+    -- Contenedor del executor (gethui): el aimbot mete la GUI ahi
+    pcall(function()
+        if gethui then
+            local h = gethui()
+            if h then self:_watch(h) end
+        end
+    end)
+    pcall(function()
+        if getgenv and getgenv().gethui then
+            local h = getgenv().gethui()
+            if h then self:_watch(h) end
+        end
+    end)
+    self:watchChams()
+end
+
+-- Vigilar los Highlight "FlowCham" que el aimbot crea bajo los personajes
+-- del Workspace (son instancias reales, no desaparecen con getgc)
+function UIProtector:watchChams()
+    if self._chams then return end
+    self._chams = true
+    local kills = {}
+    pcall(function()
+        local function sanitize(h)
+            if not self._active then return end
+            pcall(function()
+                if type(h) == "Instance" then
+                    if h:IsA("Highlight") or h:IsA("BoxHandleAdornment") or
+                       h:IsA("SelectionBox") or h:IsA("SelectionSphere") or
+                       h:IsA("SurfaceGui") or h:IsA("BillboardGui") or
+                       h:IsA("PointLight") or h:IsA("SpotLight") or
+                       h:IsA("SurfaceLight") then
+                        local n = _LOW(h.Name)
+                        if _m(n) then h.Name = _randName() end
+                    end
+                    if _m(h.Name) then h.Name = _randName() end
+                end
+            end)
+        end
+        local ws = game:FindService("Workspace")
+        if not ws then ws = game:GetService("Workspace") end
+        for _, d in ipairs(ws:GetDescendants()) do sanitize(d) end
+        local conn = ws.DescendantAdded:Connect(sanitize)
+        table.insert(self._connections, conn)
+    end)
+    -- Barrido periodico por si el anti-cheat renombra o el aimbot recrea
+    task.spawn(function()
+        while self._active do
+            task.wait(3)
+            pcall(function()
+                local ws = game:FindService("Workspace")
+                if ws then
+                    for _, d in ipairs(ws:GetDescendants()) do
+                        pcall(function()
+                            if type(d) == "Instance" and _m(d.Name) and
+                               (d:IsA("Highlight") or d:IsA("BoxHandleAdornment")) then
+                                d.Name = _randName()
+                            end
+                        end)
+                    end
+                end
+            end)
+        end
+    end)
 end
 
 -- Antiscreenshot / Antirecording: apagar la GUI mientras se captura
