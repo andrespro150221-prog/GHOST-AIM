@@ -227,29 +227,9 @@ function ServiceResolver:_install()
         end
     end)
 
-    -- 7) __namecall — filtrar enumeracion via metamethod en game y PlayerGui/CoreGui
-    pcall(function()
-        if hookmetamethod and getnamecallmethod and not o.nc then
-            local old = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
-                local m = getnamecallmethod()
-                if m == "GetChildren" or m == "GetDescendants" or m == "FindFirstChildOfClass" then
-                    local res = old(self, ...)
-                    if m == "FindFirstChildOfClass" then
-                        if _inst(res) then return nil end
-                        return res
-                    end
-                    return _filter(res)
-                end
-                if m == "FindFirstChild" or m == "WaitForChild" then
-                    local r = old(self, ...)
-                    if _inst(r) then return nil end
-                    return r
-                end
-                return old(self, ...)
-            end))
-            o.nc = old
-        end
-    end)
+    -- 7) __namecall — ELIMINADO: hookmetamethod en game es detectado
+    --    por antucheats (namecallInstance). La proteccion de GUI/chams
+    --    la hacen hooks directos de metodos en UIProtector.
 
     -- 8) getconnections — ocultar conexiones de nuestro script
     pcall(function()
