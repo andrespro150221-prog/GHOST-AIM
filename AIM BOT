@@ -1,789 +1,4 @@
--- =============================================================
---  FLOW-AIMLOCK + PROTECCION INTEGRADA (ServiceResolver v2 +
---  UIProtector v2). Carga automatica al iniciar.
---  No se modifico el codigo principal del aimbot.
--- =============================================================
-
-_G.__SR_PROTECTED_EMBED = true
-
--- ============================================================================
---  ServiceResolver v2 — Anti-Detection Layer (Lua-side, max hardening)
---  Cargar ANTES del aimbot. Oculta el aimbot y su UI de toda enumeracion
---  interna de Roblox: getgc / getreg / getinstances / getscripts /
---  getnilinstances / getloadedmodules / getscriptbytecode / string.dump /
---  debug.getinfo / debug.getregistry / getconnections / __namecall.
---  NO edita ni depende del archivo del aimbot.
--- ============================================================================
-
-local _LOW = function(s) return type(s) == "string" and string.lower(s) or "" end
-
--- Strings ofuscados (no aparecen legibles en bytecode/source scanners)
-local function _D(...)
-    local t = {...}
-    local out = ""
-    for i, v in ipairs(t) do
-        out = out .. string.char(v)
-    end
-    return out
-end
-
-local PROTECT_MARKS = {
-    _D(103,104,111,115,116), _D(97,105,109,98,111,116), _D(97,105,109),
-    _D(116,97,114,103,101,116), _D(97,117,116,111), _D(104,105,116,98,111,120),
-    _D(102,111,118), _D(99,104,97,109), _D(101,115,112), _D(108,111,99,107),
-    _D(97,108,101,114,116,98,111,116), _D(116,114,105,103,103,101,114,98,111,116),
-    _D(115,105,108,101,110,116), _D(112,114,101,100,105,99,116,105,111,110),
-    _D(119,97,108,108), "S_.u_",
-    _D(102,108,111,119),            -- flow (FlowUI / FlowCham / FlowLoaded)
-    _D(102,108,111,119,117,105),    -- flowui
-    _D(102,108,111,119,99,104,97,109),  -- flowcham
-    _D(109,97,105,110,99,111,110,116,97,105,110,101,114),  -- maincontainer
-    _D(99,104,97,109,115),          -- chams
-    _D(115,104,111,119,109,105,114,97),  -- showmira / fov
-    _D(101,115,112,112,108,97,121,101,114,115),  -- espplayers
-    _D(97,117,116,111,108,111,99,107),  -- autolock
-    _D(97,117,116,111,102,105,114,101),  -- autofire
-}
-local SRC_MARKS = {
-    _D(103,104,111,115,116), _D(114,101,115,111,108,118,101,114),
-    _D(112,114,111,116,101,99,116,111,114), _D(97,108,101,114,116),
-    _D(97,105,109), "S_.u_",
-    _D(102,108,111,119),            -- flow
-    _D(102,108,111,119,117,105),    -- flowui
-    _D(99,104,97,109),              -- cham
-    _D(101,115,112),                -- esp
-    _D(97,117,116,111,108,111,99,107),  -- autolock
-}
-
-local function _m(s)
-    local l = _LOW(s)
-    for _, p in ipairs(PROTECT_MARKS) do if string.find(l, p, 1, true) then return true end end
-    return false
-end
-local function _sm(s)
-    local l = _LOW(s)
-    for _, p in ipairs(SRC_MARKS) do if string.find(l, p, 1, true) then return true end end
-    return false
-end
-local function _inst(obj)
-    return type(obj) == "Instance" and (_m(obj.Name) or _m(obj.ClassName))
-end
--- isourclosure: identifica closures propios de este script exactamente
-local _isOwn = function(f)
-    if isourclosure and type(f) == "function" then
-        return isourclosure(f)
-    end
-    return false
-end
-local function _filter(list)
-    local out = {}
-    for _, v in ipairs(list) do
-        if _isOwn(v) then
-            -- nunca filtrar closures propios de getgc (los necesita el executor)
-        elseif not _inst(v) then
-            table.insert(out, v)
-        end
-    end
-    return out
-end
-
-local ServiceResolver = {}
-ServiceResolver.__index = ServiceResolver
-
-function ServiceResolver.new()
-    return setmetatable({ _o = {}, _active = true, _hidden = {} }, ServiceResolver)
-end
-
-function ServiceResolver:addHiddenTag(tag)
-    if type(tag) == "string" then table.insert(PROTECT_MARKS, _LOW(tag)) end
-end
-
-function ServiceResolver:Get(name)
-    local srv, ok, r
-    ok, r = pcall(function() return game:GetService(name) end)
-    if ok and r then srv = r end
-    if not srv then ok, r = pcall(function() return game:FindService(name) end); if ok and r then srv = r end end
-    if not srv then ok, r = pcall(function() return rawget(game, name) end); if ok and r then srv = r end end
-    if srv then self._hidden[name] = srv end
-    return srv
-end
-
--- ----------------------------------------------------------------------------
---  NUCLEO DE PROTECCION — solo se instala una vez
--- ----------------------------------------------------------------------------
-function ServiceResolver:_install()
-    if self._installed then return end
-    self._installed = true
-    local o = self._o
-
-    -- 1) Enumeradores de instancias / scripts / registry
-    pcall(function()
-        for _, g in ipairs({
-            "getinstances", "getscripts", "getnilinstances",
-            "getloadedmodules", "getreg", "getconnectedinstances",
-        }) do
-            if _G[g] and not o["e_" .. g] then
-                o["e_" .. g] = _G[g]
-                local fn = _G[g]
-                _G[g] = function(...) return _filter(fn(...)) end
-            end
-        end
-    end)
-
-    -- 2) getgc — filtrar tablas/instancias/contenedores del aimbot
-    pcall(function()
-        if getgc and not o.gc then
-            o.gc = getgc
-            local fn = getgc
-            getgc = function(t)
-                local res = fn(t)
-                local out = {}
-                for _, v in ipairs(res) do
-                    local skip = _inst(v)
-                    if not skip and type(v) == "function" then
-                        -- ocultar closures propios del aimbot (identificados por source marcado o isourclosure)
-                        local own = _isOwn(v)
-                        if own and isreadable and not isreadable(v) then
-                            skip = true
-                        elseif not own then
-                            local di = debug and debug.getinfo and debug.getinfo(v)
-                            if di and _sm(di.source or "") then skip = true end
-                        end
-                    end
-                    if not skip and type(v) == "table" then
-                        for k in pairs(v) do
-                            if _sm(tostring(k)) then skip = true break end
-                        end
-                    end
-                    if not skip then table.insert(out, v) end
-                end
-                return out
-            end
-        end
-    end)
-
-    -- 3) getscriptbytecode — data corrupta para scripts del aimbot
-    pcall(function()
-        if getscriptbytecode and not o.bs then
-            o.bs = getscriptbytecode
-            local fn = getscriptbytecode
-            getscriptbytecode = function(scr)
-                if _inst(scr) then return "\194\160" end
-                return fn(scr)
-            end
-        end
-    end)
-
-    -- 4) string.dump — bloquear decompilado
-    pcall(function()
-        if string.dump and not o.sd then
-            o.sd = string.dump
-            local fn = string.dump
-            string.dump = function(func, strip)
-                local di = debug and debug.getinfo and debug.getinfo(func)
-                if di and _sm(di.source or "") then return "\194\160" end
-                return fn(func, strip)
-            end
-        end
-    end)
-
-    -- 5) debug.getinfo — borrar identidad del source
-    pcall(function()
-        if debug and debug.getinfo and not o.dg then
-            o.dg = debug.getinfo
-            local fn = debug.getinfo
-            debug.getinfo = function(l, w)
-                local info = fn(l, w)
-                if info and _sm(info.source or "") then
-                    info.source = "=[Roblox stdlib]"
-                    info.short_src = "=[Roblox stdlib]"
-                    if info.name then info.name = "" end
-                    info.what = "C"
-                end
-                return info
-            end
-        end
-    end)
-
-    -- 6) debug.getregistry — filtrar tablas sensibles
-    pcall(function()
-        if debug and debug.getregistry and not o.dr then
-            o.dr = debug.getregistry
-            local fn = debug.getregistry
-            debug.getregistry = function()
-                local r = fn()
-                local out = {}
-                for _, v in ipairs(r) do
-                    local skip = _inst(v)
-                    if not skip and type(v) == "table" then
-                        for k in pairs(v) do
-                            if _sm(tostring(k)) then skip = true break end
-                        end
-                    end
-                    if not skip then table.insert(out, v) end
-                end
-                return out
-            end
-        end
-    end)
-
-    -- 7) __namecall — ELIMINADO: hookmetamethod en game es detectado
-    --    por antucheats (namecallInstance). La proteccion de GUI/chams
-    --    la hacen hooks directos de metodos en UIProtector.
-
-    -- 8) getconnections — ocultar conexiones de nuestro script
-    pcall(function()
-        if getconnections and not o.cn then
-            o.cn = true
-            local oldGCr = getconnections
-            _G.getconnections = function(sig)
-                local res = oldGCr(sig)
-                local out = {}
-                for _, c in ipairs(res) do
-                    local skip = false
-                    if c and c.Node and c.Node.Function then
-                        if _isOwn(c.Node.Function) then skip = true end
-                        if not skip then
-                            local di = debug and debug.getinfo and debug.getinfo(c.Node.Function)
-                            if di and _sm(di.source or "") then skip = true end
-                        end
-                    end
-                    if not skip then table.insert(out, c) end
-                end
-                return out
-            end
-        end
-    end)
-
-    -- 8b) getconnections global helper: si no hay getgc, al menos protege isreadable
-    pcall(function()
-        if getconnections and not o.cn2 and _isOwn then
-            -- ya cubierto arriba
-        end
-    end)
-
-    -- 8c) getgenv / _G — ocultar claves marcadas (FlowLoaded, FlowUI, etc.)
-    pcall(function()
-        if getgenv and not o.ge then
-            o.ge = getgenv
-            local fn = getgenv
-            getgenv = function()
-                local env = fn()
-                local copy = {}
-                for k, v in pairs(env) do
-                    if not _sm(tostring(k)) then copy[k] = v end
-                end
-                return copy
-            end
-        end
-        if not o.gte and setmetatable then
-            -- marcar tambien en _G directo (getgenv suele devolverlo)
-            o.gte = true
-        end
-    end)
-
-    -- 9) getcallingscript / getcaller — no revelar nuestro script
-    pcall(function()
-        for _, g in ipairs({ "getcallingscript", "getcaller" }) do
-            if _G[g] and not o["cs_" .. g] then
-                o["cs_" .. g] = _G[g]
-                local fn = _G[g]
-                _G[g] = function(...)
-                    local r = fn(...)
-                    if _inst(r) then return nil end
-                    return r
-                end
-            end
-        end
-    end)
-
-    -- 10) Limpiar huella en getgenv/_G de nosotros mismos
-    pcall(function()
-        -- El nombre de este script apunta en _G.__SR; protejamos la tabla
-        -- Oculta este script en getgc via fuente
-    end)
-
-    -- 11) Watchdog suave: re-verifica que los hooks sigan instalados
-    pcall(function()
-        local rs = game:GetService("RunService")
-        if rs and rs.Heartbeat then
-            local conn = rs.Heartbeat:Connect(function()
-                if not self._active then
-                    if self._hb then self._hb:Disconnect() end
-                    return
-                end
-                -- Reafirmar si un anti-cheat de script los borro
-                pcall(function()
-                    if o.gc and getgc ~= _G.__SR_INTERNAL_GC then
-                        -- (no-op defensivo)
-                    end
-                end)
-            end)
-            self._hb = conn
-        end
-    end)
-end
-
-function ServiceResolver:Destroy()
-    self._active = false
-    self._cache = {}
-    local o = self._o
-    pcall(function()
-        if o.gc then getgc = o.gc end
-        if o.ge then getgenv = o.ge end
-        if o.bs then getscriptbytecode = o.bs end
-        if o.sd then string.dump = o.sd end
-        if o.dg then debug.getinfo = o.dg end
-        if o.dr then debug.getregistry = o.dr end
-        for k, v in pairs(o) do
-            if string.find(k, "e_") then _G[string.sub(k, 3)] = v end
-            if string.find(k, "cs_") then _G[string.sub(k, 4)] = v end
-        end
-    end)
-end
-
-if not _G.__SR then
-    _G.__SR = ServiceResolver.new()
-    _G.__SR:_install()
-end
-
-
--- ============================================================================
---  UIProtector v2 — GUI Anti-Detection Layer (Lua-side, max hardening)
---  Cargar ANTES del aimbot. Detecta la UI del aimbot cuando se crea y la
---  oculta de: getinstances / getscripts / getgc / GetChildren /
---  GetDescendants / FindFirstChild / WaitForChild / screenshots / recording.
---  NO edita ni depende del archivo del aimbot.
--- ============================================================================
-
-local UIProtector = {}
-UIProtector.__index = UIProtector
-
-local Players = game:GetService("Players")
-local CoreGui = game:GetService("CoreGui")
-local HttpService = game:GetService("HttpService")
-
-local _LOW = function(s) return type(s) == "string" and string.lower(s) or "" end
-local _D = function(...)
-    local t = {...}
-    local out = ""
-    for i, v in ipairs(t) do out = out .. string.char(v) end
-    return out
-end
-local GUI_MARKS = {
-    _D(115,101,116,116,105,110,103,115,109,101,110,117), "S_.u_",
-    _D(103,104,111,115,116), _D(97,105,109), _D(116,97,114,103,101,116),
-    _D(97,117,116,111), _D(104,105,116,98,111,120), _D(102,111,118),
-    _D(99,104,97,109), _D(101,115,112), _D(99,111,110,102,105,103),
-    _D(118,105,115,117,97,108), _D(109,101,110,117), _D(99,111,110,116,97,105,110,101,114),
-    _D(108,111,99,107), _D(117,105),
-    _D(102,108,111,119),     -- flow (FlowUI / FlowCham / FlowLoaded)
-    _D(109,97,105,110),      -- main (MainContainer)
-    _D(116,111,103,103,108,101),  -- toggle (MobileToggleBtn)
-    _D(109,111,98,105,108,101),   -- mobile
-    _D(100,114,97,103),      -- drag
-    _D(115,99,114,111,108,108),   -- scroll
-    _D(107,101,121),         -- key
-    _D(99,104,97,109,115),   -- chams
-    _D(115,101,116,116,105,110,103,115),
-    _D(119,97,108,108),      -- wall
-    _D(97,117,116,111,102,105,114,101),  -- autofire
-}
-
-local function _m(s)
-    local l = _LOW(s)
-    for _, p in ipairs(GUI_MARKS) do if string.find(l, p, 1, true) then return true end end
-    return false
-end
-local function _randName()
-    return "S_.u_" .. tostring(math.random(100000, 999999)) .. "_" .. tostring(math.random(100000, 999999))
-end
-
-function UIProtector.new()
-    local self = setmetatable({}, UIProtector)
-    self._active = true
-    self._connections = {}
-    self._protected = {}
-    self._o = {}
-    return self
-end
-
--- Renombra todos los children de la GUI a nombres inocentes
-local function _wipeNames(gui)
-    pcall(function()
-        for _, d in ipairs(gui:GetDescendants()) do
-            if d:IsA("Frame") or d:IsA("TextLabel") or d:IsA("TextButton") or
-               d:IsA("ScrollingFrame") or d:IsA("ImageLabel") or d:IsA("UIStroke") or
-               d:IsA("ImageButton") or d:IsA("TextInput") or d:IsA("UICorner") or
-               d:IsA("UIGradient") or d:IsA("LocalScript") or d:IsA("ModuleScript") then
-                d.Name = _randName()
-            end
-        end
-    end)
-end
-
-function UIProtector:_protectGUI(gui, container)
-    pcall(function()
-        if type(gui) ~= "Instance" or not gui:IsA("ScreenGui") then return end
-        if self._protected[gui] then return end
-
-        local mark = _m(gui.Name)
-        if not mark then
-            for _, c in ipairs(gui:GetChildren()) do
-                if _m(c.Name) then mark = true break end
-            end
-        end
-        if not mark then return end
-
-        self._protected[gui] = true
-        gui.Name = _randName()
-        _wipeNames(gui)
-
-        -- Vigilar descendants nuevos
-        local conn = gui.DescendantAdded:Connect(function(d)
-            if not self._active then if conn then conn:Disconnect() end return end
-            task.defer(function()
-                pcall(function()
-                    if d.Name and _m(d.Name) then d.Name = _randName() end
-                    if d:IsA("LocalScript") or d:IsA("ModuleScript") then d.Name = _randName() end
-                end)
-            end)
-        end)
-        table.insert(self._connections, conn)
-
-        -- Ocultar de los métodos de enumeracion del contenedor
-        if container and not self._o[container] then
-            self._o[container] = {
-                gc = container.GetChildren, gd = container.GetDescendants,
-                ff = container.FindFirstChild, wf = container.WaitForChild,
-                ffo = container.FindFirstChildOfClass,
-            }
-            local gc, gd = container.GetChildren, container.GetDescendants
-            local ff, wf = container.FindFirstChild, container.WaitForChild
-            local ffo = container.FindFirstChildOfClass
-            local prot = self._protected
-
-            container.GetChildren = function(s, ...)
-                local res = gc(s, ...)
-                local out = {}
-                for _, v in ipairs(res) do
-                    if type(v) == "Instance" then
-                        local skip = prot[v]
-                        if not skip then table.insert(out, v) end
-                    else
-                        table.insert(out, v)
-                    end
-                end
-                return out
-            end
-            container.GetDescendants = function(s, ...)
-                local res = gd(s, ...)
-                local out = {}
-                for _, v in ipairs(res) do
-                    local skip = false
-                    if type(v) == "Instance" then
-                        if prot[v] then skip = true
-                        else
-                            for g in pairs(prot) do
-                                if v:IsDescendantOf(g) then skip = true break end
-                            end
-                        end
-                    end
-                    if not skip then table.insert(out, v) end
-                end
-                return out
-            end
-            container.FindFirstChild = function(s, ...)
-                local r = ff(s, ...)
-                if type(r) == "Instance" and prot[r] then return nil end
-                return r
-            end
-            container.WaitForChild = function(s, ...)
-                local r = wf(s, ...)
-                if type(r) == "Instance" and prot[r] then return nil end
-                return r
-            end
-            container.FindFirstChildOfClass = function(s, cls, ...)
-                local children = container:GetChildren()
-                for _, v in ipairs(children) do
-                    if v.ClassName == cls then return v end
-                end
-                return nil
-            end
-        end
-    end)
-end
-
-function UIProtector:_watch(container)
-    if not container then return end
-    for _, c in ipairs(container:GetChildren()) do self:_protectGUI(c, container) end
-
-    local conn = container.DescendantAdded:Connect(function(c)
-        if self._active and c:IsA("ScreenGui") then
-            task.defer(function() self:_protectGUI(c, container) end)
-        end
-    end)
-    table.insert(self._connections, conn)
-
-    -- Limpiar via GetPropertyChangedSignal: si renombran la GUI despues, volver a esconder
-    local conn2 = container.ChildAdded:Connect(function(c)
-        if self._active and c:IsA("ScreenGui") then
-            task.defer(function() self:_protectGUI(c, container) end)
-        end
-    end)
-    table.insert(self._connections, conn2)
-end
-
-function UIProtector:startWatching()
-    if self._watching then return end
-    self._watching = true
-    pcall(function()
-        local plr = Players.LocalPlayer
-        if plr and plr:FindFirstChild("PlayerGui") then
-            self:_watch(plr:FindFirstChild("PlayerGui"))
-        end
-    end)
-    pcall(function() self:_watch(CoreGui) end)
-    -- Contenedor del executor (gethui): el aimbot mete la GUI ahi
-    pcall(function()
-        if gethui then
-            local h = gethui()
-            if h then self:_watch(h) end
-        end
-    end)
-    pcall(function()
-        if getgenv and getgenv().gethui then
-            local h = getgenv().gethui()
-            if h then self:_watch(h) end
-        end
-    end)
-    self:watchChams()
-    self:hookWorkspace()
-end
-
--- Ocultar los FlowCham del Workspace ante GetDescendants/GetChildren/
--- FindFirstChild/WaitForChild/FindFirstChildOfClass (anti-cheats con scripts
--- locales en el juego los buscan ahi)
-function UIProtector:hookWorkspace()
-    if self._ws then return end
-    self._ws = true
-    pcall(function()
-        local ws = game:FindService("Workspace")
-        if not ws then ws = game:GetService("Workspace") end
-        if not ws or self._o[ws] then return end
-        local prot = self._protected
-        local function markedName(n)
-            n = _LOW(n)
-            return string.find(n, "s_.u_", 1, true) ~= nil
-        end
-        local function skipUnder(inst)
-            if not type(inst) == "Instance" then return false end
-            if markedName(inst.Name) then return true end
-            if prot[inst] then return true end
-            local p = inst.Parent
-            while p do
-                if prot[p] then return true end
-                p = p.Parent
-            end
-            return false
-        end
-        self._o[ws] = {
-            gc = ws.GetChildren, gd = ws.GetDescendants,
-            ff = ws.FindFirstChild, wf = ws.WaitForChild,
-            ffo = ws.FindFirstChildOfClass,
-        }
-        local gc, gd = ws.GetChildren, ws.GetDescendants
-        local ff, wf = ws.FindFirstChild, ws.WaitForChild
-        local ffo = ws.FindFirstChildOfClass
-        ws.GetChildren = function(s, ...)
-            local res = gc(s, ...)
-            local out = {}
-            for _, v in ipairs(res) do
-                if type(v) == "Instance" and markedName(v.Name) then
-                    -- oculto
-                else
-                    table.insert(out, v)
-                end
-            end
-            return out
-        end
-        ws.GetDescendants = function(s, ...)
-            local res = gd(s, ...)
-            local out = {}
-            for _, v in ipairs(res) do
-                if type(v) == "Instance" and not skipUnder(v) then
-                    table.insert(out, v)
-                end
-            end
-            return out
-        end
-        ws.FindFirstChild = function(s, n, ...)
-            local r = ff(s, n, ...)
-            if type(r) == "Instance" and markedName(r.Name) then return nil end
-            return r
-        end
-        ws.WaitForChild = function(s, n, ...)
-            local r = wf(s, n, ...)
-            if type(r) == "Instance" and markedName(r.Name) then return nil end
-            return r
-        end
-        ws.FindFirstChildOfClass = function(s, cls, ...)
-            local r = ffo(s, cls, ...)
-            if type(r) == "Instance" and markedName(r.Name) then return nil end
-            return r
-        end
-    end)
-end
-
--- Vigilar los Highlight "FlowCham" que el aimbot crea bajo los personajes
--- del Workspace (son instancias reales, no desaparecen con getgc)
-function UIProtector:watchChams()
-    if self._chams then return end
-    self._chams = true
-    local kills = {}
-    pcall(function()
-        local function sanitize(h)
-            if not self._active then return end
-            pcall(function()
-                if type(h) == "Instance" then
-                    if h:IsA("Highlight") or h:IsA("BoxHandleAdornment") or
-                       h:IsA("SelectionBox") or h:IsA("SelectionSphere") or
-                       h:IsA("SurfaceGui") or h:IsA("BillboardGui") or
-                       h:IsA("PointLight") or h:IsA("SpotLight") or
-                       h:IsA("SurfaceLight") then
-                        local n = _LOW(h.Name)
-                        if _m(n) then h.Name = _randName() end
-                    end
-                    if _m(h.Name) then h.Name = _randName() end
-                end
-            end)
-        end
-        local ws = game:FindService("Workspace")
-        if not ws then ws = game:GetService("Workspace") end
-        for _, d in ipairs(ws:GetDescendants()) do sanitize(d) end
-        local conn = ws.DescendantAdded:Connect(sanitize)
-        table.insert(self._connections, conn)
-    end)
-    -- Barrido periodico por si el anti-cheat renombra o el aimbot recrea
-    task.spawn(function()
-        while self._active do
-            task.wait(3)
-            pcall(function()
-                local ws = game:FindService("Workspace")
-                if ws then
-                    for _, d in ipairs(ws:GetDescendants()) do
-                        pcall(function()
-                            if type(d) == "Instance" and _m(d.Name) and
-                               (d:IsA("Highlight") or d:IsA("BoxHandleAdornment")) then
-                                d.Name = _randName()
-                            end
-                        end)
-                    end
-                end
-            end)
-        end
-    end)
-end
-
--- Antiscreenshot / Antirecording: apagar la GUI mientras se captura
-function UIProtector:protectScreenshots()
-    pcall(function()
-        local prots = self._protected
-        local function toggle(on)
-            for g in pairs(prots) do
-                pcall(function() if g and g.Enabled ~= on then g.Enabled = on end end)
-            end
-        end
-        for _, fn in ipairs({ "takesscreenshot", "savescreenshotidentifier", "recordid" }) do
-            if _G[fn] and not self._o[fn] then
-                self._o[fn] = _G[fn]
-                local base = _G[fn]
-                _G[fn] = function(...)
-                    toggle(false)
-                    local r = base(...)
-                    task.defer(function() toggle(true) end)
-                    return r
-                end
-            end
-        end
-    end)
-end
-
--- Proteger la GUI tambien contra getgc (tables del UI via __SR si existe)
-function UIProtector:syncWithResolver()
-    if _G.__SR and _G.__SR.addHiddenTag then
-        for k in pairs(self._protected) do
-            pcall(function()
-                if type(k) == "Instance" and k.Name then
-                    _G.__SR:addHiddenTag(k.Name)
-                end
-            end)
-        end
-    end
-end
-
--- Proteger objeto Drawing (mira, ESP) que no son instancias:
--- se registran como tags ocultas en getgc para que no aparezcan
-function UIProtector:protectDrawings(resolver)
-    pcall(function()
-        if not Drawing then return end
-        -- Si hay un resolver con addHiddenTag, registrar marcadores
-        if resolver and resolver.addHiddenTag then
-            for _, tag in ipairs({ _D(102,111,118), _D(101,115,112), _D(104,105,116,98,111,120) }) do
-                pcall(function() resolver:addHiddenTag(tag) end)
-            end
-        end
-        -- Interceptar Drawing.new: guardar objetos no-instancia para
-        -- que no se filtren erroneamente, y evitar que queden en getgc
-        if not self._o.dnew and Drawing.new then
-            self._o.dnew = Drawing.new
-            local oldNew = Drawing.new
-            Drawing.new = newcclosure(function(kind, ...)
-                local d = oldNew(kind, ...)
-                -- marcar para filtrado en getgc
-                pcall(function()
-                    if d and d.Visible ~= nil then
-                        d.Visible = false
-                        task.defer(function() if d and d.Visible ~= nil then pcall(function() d.Visible = true end) end end)
-                    end
-                end)
-                return d
-            end)
-        end
-    end)
-end
-
-function UIProtector:destroy()
-    self._active = false
-    for _, conn in ipairs(self._connections) do
-        pcall(function() if conn.Connected then conn:Disconnect() end end)
-    end
-    self._connections = {}
-    for container, o in pairs(self._o) do
-        pcall(function()
-            if container then
-                container.GetChildren = o.gc
-                container.GetDescendants = o.gd
-                container.FindFirstChild = o.ff
-                container.WaitForChild = o.wf
-                container.FindFirstChildOfClass = o.ffo
-            end
-        end)
-    end
-end
-
-if not _G.__UIProtector then
-    _G.__UIProtector = UIProtector.new()
-    _G.__UIProtector:startWatching()
-    _G.__UIProtector:protectScreenshots()
-    task.defer(function()
-        _G.__UIProtector:syncWithResolver()
-        _G.__UIProtector:protectDrawings(_G.__SR)
-    end)
-end
-
-
-
+-- =========================================================
 -- FLOW-AIMLOCK (Versión Universal: Móvil & PC)
 -- Soporte: Delta (iOS/Android), Arceus X, Codex, PC
 -- =========================================================
@@ -1337,6 +552,67 @@ UserInputService.InputChanged:Connect(function(input)
 end)
 
 -- ═══════════════════════════════════════════  
+--  UI PROTECTOR (Anti-Delete / Auto-Restore)
+-- ═══════════════════════════════════════════  
+local UIProtector = {
+    roots  = { Gui, Container, MobileToggleBtn },
+    hooked = false,
+    paused = false,
+}
+
+local function isProtectedInstance(instance)
+    for i = 1, #UIProtector.roots do
+        local root = UIProtector.roots[i]
+        if root and (instance == root or instance:IsDescendantOf(root)) then
+            return true
+        end
+    end
+    return false
+end
+
+UIProtector.installHook = function()
+    if UIProtector.hooked then return end
+    local ok = pcall(function()
+        local mt = getrawmetatable(game)
+        setreadonly(mt, false)
+        local oldNamecall = mt.__namecall
+        mt.__namecall = newcclosure(function(self, ...)
+            local args = { ... }
+            local method = getnamecallmethod()
+            if not UIProtector.paused and (method == "Destroy" or method == "Remove") then
+                local inst = self
+                while inst do
+                    if isProtectedInstance(inst) then return end
+                    inst = inst.Parent
+                end
+            end
+            if not UIProtector.paused and method == "ClearAllChildren" and isProtectedInstance(self) then
+                return
+            end
+            return oldNamecall(self, unpack(args))
+        end)
+        setreadonly(mt, true)
+    end)
+    UIProtector.hooked = true
+    return ok
+end
+
+UIProtector.installHook()
+
+task.spawn(function()
+    while ScriptActive do
+        task.wait(0.75)
+        if UIProtector.paused then break end
+        pcall(function()
+            if Gui and Gui.Parent ~= targetGui then Gui.Parent = targetGui end
+            if Gui then Gui.Enabled = true end
+            if Container and Container.Parent ~= Gui then Container.Parent = Gui end
+            if MobileToggleBtn and MobileToggleBtn.Parent ~= Gui then MobileToggleBtn.Parent = Gui end
+        end)
+    end
+end)
+
+-- ═══════════════════════════════════════════  
 --  COMPONENTES  
 -- ═══════════════════════════════════════════  
   
@@ -1773,10 +1049,97 @@ createToggle("Team Check", 12, true, function(v) Config.TeamCheck = v end)
 createSection("Visuals", 13)  
 createToggle("ESP Players", 14, true, function(v) Config.ShowESP = v end)  
 createToggle("Show Mira (FOV)", 15, true, function(v) Config.ShowFOV = v end)  
-  
+
+-- ═══════════════════════════════════════════  
+--  SERVER RESOLVER (Ping, Región, PlaceID, JobID)
+--  Usa solo APIs públicas de Roblox.
+-- ═══════════════════════════════════════════  
+local NetworkClient = game:GetService("NetworkClient")
+local GameInfoProvider
+pcall(function() GameInfoProvider = game:GetService("GameInfoProvider") end)
+
+local ServerData = {
+    Region  = "?",
+    Ping    = 0,
+    PlaceId = tostring(game.PlaceId),
+    JobId   = game.JobId ~= "" and game.JobId or "Sin servidor",
+}
+
+task.spawn(function()
+    pcall(function()
+        if not GameInfoProvider or game.JobId == "" then
+            ServerData.Region = "LOCAL"
+            return
+        end
+        local ok, region = pcall(function()
+            return GameInfoProvider:GetCountryRegionForServerAsync(game.PlaceId, game.JobId)
+        end)
+        ServerData.Region = ok and region or "?"
+    end)
+end)
+
+task.spawn(function()
+    while ScriptActive do
+        ServerData.Ping = math.floor(NetworkClient:GetPing())
+        ServerData.JobId = game.JobId ~= "" and game.JobId or "Sin servidor"
+        task.wait(0.5)
+    end
+end)
+
+createSection("Servidor", 16)
+
+local serverPanel = Instance.new("Frame", Content)
+serverPanel.LayoutOrder = 17
+serverPanel.Size = UDim2.new(1, 0, 0, 50)
+serverPanel.BackgroundColor3 = Theme.GlassLight
+serverPanel.BackgroundTransparency = 0.55
+serverPanel.ZIndex = 10
+Instance.new("UICorner", serverPanel).CornerRadius = UDim.new(0, 8)
+local serverStroke = Instance.new("UIStroke", serverPanel)
+serverStroke.Color = Theme.Accent
+serverStroke.Transparency = 0.85
+serverStroke.Thickness = 1
+
+local serverLabel = Instance.new("TextLabel", serverPanel)
+serverLabel.Name = "ServerResolveLabel"
+serverLabel.BackgroundTransparency = 1
+serverLabel.Position = UDim2.new(0, 12, 0, 0)
+serverLabel.Size = UDim2.new(1, -24, 1, 0)
+serverLabel.TextXAlignment = Enum.TextXAlignment.Left
+serverLabel.TextYAlignment = Enum.TextYAlignment.Center
+serverLabel.Font = Enum.Font.Gotham
+serverLabel.TextSize = 11
+serverLabel.TextColor3 = Theme.Text
+serverLabel.Text = "Resolviendo servidor..."
+serverLabel.TextWrapped = true
+serverLabel.ZIndex = 11
+
+table.insert(interactiveElements, serverPanel)
+
+local showServerInfo = true
+createToggle("Info del Servidor", 18, true, function(v)
+    showServerInfo = v
+    serverPanel.Visible = v
+end)
+
+task.spawn(function()
+    while ScriptActive do
+        task.wait(1)
+        if showServerInfo and serverPanel and serverPanel.Parent then
+            serverLabel.Text = string.format(
+                "Region: %s   |   Ping: %d ms\nPlaceID: %s   |   JobID: %s",
+                ServerData.Region,
+                ServerData.Ping,
+                ServerData.PlaceId,
+                ServerData.JobId
+            )
+        end
+    end
+end)
+
 -- ═══════════════════════════════════════════  
 --  MINIMIZAR / CERRAR  
--- ═══════════════════════════════════════════  
+-- ═══════════════════════════════════════════
   
 local isClosing, isMinimized = false, false  
 local savedSize = Vector2.new(defaultW, defaultH)  
@@ -1817,6 +1180,7 @@ CloseBtn.Activated:Connect(function()
     if isClosing then return end  
     isClosing = true  
     ScriptActive = false  
+    UIProtector.paused = true  
     for _, player in ipairs(Players:GetPlayers()) do   
         removeESP(player)  
         if HighlightCache[player] then  
