@@ -26,11 +26,25 @@ local PROTECT_MARKS = {
     _D(97,108,101,114,116,98,111,116), _D(116,114,105,103,103,101,114,98,111,116),
     _D(115,105,108,101,110,116), _D(112,114,101,100,105,99,116,105,111,110),
     _D(119,97,108,108), "S_.u_",
+    _D(102,108,111,119),            -- flow (FlowUI / FlowCham / FlowLoaded)
+    _D(102,108,111,119,117,105),    -- flowui
+    _D(102,108,111,119,99,104,97,109),  -- flowcham
+    _D(109,97,105,110,99,111,110,116,97,105,110,101,114),  -- maincontainer
+    _D(99,104,97,109,115),          -- chams
+    _D(115,104,111,119,109,105,114,97),  -- showmira / fov
+    _D(101,115,112,112,108,97,121,101,114,115),  -- espplayers
+    _D(97,117,116,111,108,111,99,107),  -- autolock
+    _D(97,117,116,111,102,105,114,101),  -- autofire
 }
 local SRC_MARKS = {
     _D(103,104,111,115,116), _D(114,101,115,111,108,118,101,114),
     _D(112,114,111,116,101,99,116,111,114), _D(97,108,101,114,116),
     _D(97,105,109), "S_.u_",
+    _D(102,108,111,119),            -- flow
+    _D(102,108,111,119,117,105),    -- flowui
+    _D(99,104,97,109),              -- cham
+    _D(101,115,112),                -- esp
+    _D(97,117,116,111,108,111,99,107),  -- autolock
 }
 
 local function _m(s)
@@ -260,6 +274,26 @@ function ServiceResolver:_install()
         end
     end)
 
+    -- 8c) getgenv / _G — ocultar claves marcadas (FlowLoaded, FlowUI, etc.)
+    pcall(function()
+        if getgenv and not o.ge then
+            o.ge = getgenv
+            local fn = getgenv
+            getgenv = function()
+                local env = fn()
+                local copy = {}
+                for k, v in pairs(env) do
+                    if not _sm(tostring(k)) then copy[k] = v end
+                end
+                return copy
+            end
+        end
+        if not o.gte and setmetatable then
+            -- marcar tambien en _G directo (getgenv suele devolverlo)
+            o.gte = true
+        end
+    end)
+
     -- 9) getcallingscript / getcaller — no revelar nuestro script
     pcall(function()
         for _, g in ipairs({ "getcallingscript", "getcaller" }) do
@@ -308,6 +342,7 @@ function ServiceResolver:Destroy()
     local o = self._o
     pcall(function()
         if o.gc then getgc = o.gc end
+        if o.ge then getgenv = o.ge end
         if o.bs then getscriptbytecode = o.bs end
         if o.sd then string.dump = o.sd end
         if o.dg then debug.getinfo = o.dg end
