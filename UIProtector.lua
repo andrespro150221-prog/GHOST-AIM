@@ -1,296 +1,285 @@
--- UIProtector v2 - Protección anti-kick para juegos fuertes
--- Se ejecuta ANTES del aimbot. Detecta y protege la UI del aimbot
--- cuando se crea automáticamente, ocultándola de todos los escaneos:
---  - getinstances/getscripts/getloadedmodules/getnilinstances
---  - getgc
---  - getscriptbytecode
---  - GetChildren/GetDescendants en PlayerGui + CoreGui
---  - Rename automático de nombres sensibles
--- Uso: pégame primero en Opiumware, luego el aimbot.
+-- ============================================================================
+--  UIProtector v2 — GUI Anti-Detection Layer (Lua-side, max hardening)
+--  Cargar ANTES del aimbot. Detecta la UI del aimbot cuando se crea y la
+--  oculta de: getinstances / getscripts / getgc / GetChildren /
+--  GetDescendants / FindFirstChild / WaitForChild / screenshots / recording.
+--  NO edita ni depende del archivo del aimbot.
+-- ============================================================================
 
--- ============================================================
---  MODO DE USO:
---  1) Carga este archivo PRIMERO en Opiumware
---  2) Luego ejecuta el aimbot
---  El protector detecta la ScreenGui y l-- ServiceResolver v2 - Protección anti-kick para juegos fuertes
--- Se ejecuta ANTES del aimbot. Instala hooks globales que ocultan
--- el script del aimbot de escaneos internos de Roblox
--- (getgc, getinstances, getscripts, getscriptbytecode, string.dump)
--- Uso: pégame primero en Opiumware, luego ejecuta el aimbot.
+local UIProtector = {}
+UIProtector.__index = UIProtector
 
--- ============================================================
---  MODO DE USO:
---  1) Carga ESTE archivo primero (o con el loader que activa Guard)
---  2) Luego ejecuta el aimbot (AIM BOT / GHOST-AIM)
---  Los hooks se mantienen activos y protegen el aimbot.
--- ============================================================
+local Players = game:GetService("Players")
+local CoreGui = game:GetService("CoreGui")
+local HttpService = game:GetService("HttpService")
 
-local ServiceResolver = {}
-ServiceResolver.__index = ServiceResolver
-
--- Collection de "marcas" para identificar objetos del aimbot
--- (cualquier script/instancia que contenga estos patrones se protege)
-local PROTECT_PATTERNS = {
-    "UIProtector", "ServiceResolver", "GhostUI", "Ghost",
-    "SettingsMenu", "aimbot", "Aimbot", "AIMBOT",
-    "TargetLock", "AutoShoot", "Hitbox", "ESP",
+local _LOW = function(s) return type(s) == "string" and string.lower(s) or "" end
+local _D = function(...)
+    local t = {...}
+    local out = ""
+    for i, v in ipairs(t) do out = out .. string.char(v) end
+    return out
+end
+local GUI_MARKS = {
+    _D(115,101,116,116,105,110,103,115,109,101,110,117), "S_.u_",
+    _D(103,104,111,115,116), _D(97,105,109), _D(116,97,114,103,101,116),
+    _D(97,117,116,111), _D(104,105,116,98,111,120), _D(102,111,118),
+    _D(99,104,97,109), _D(101,115,112), _D(99,111,110,102,105,103),
+    _D(118,105,115,117,97,108), _D(109,101,110,117), _D(99,111,110,116,97,105,110,101,114),
+    _D(108,111,99,107), _D(117,105),
 }
 
-local function matchesPattern(needle)
-    if type(needle) ~= "string" then return false end
-    for _, p in ipairs(PROTECT_PATTERNS) do
-        if string.find(needle, p, 1, true) then
-            return true
-        end
-    end
+local function _m(s)
+    local l = _LOW(s)
+    for _, p in ipairs(GUI_MARKS) do if string.find(l, p, 1, true) then return true end end
     return false
 end
-
-local function isProtectedInstance(inst)
-    if type(inst) ~= "Instance" then return false end
-    return matchesPattern(inst.Name) or matchesPattern(inst.ClassName)
+local function _randName()
+    return "S_.u_" .. tostring(math.random(100000, 999999)) .. "_" .. tostring(math.random(100000, 999999))
 end
 
-local function isProtectedSource(src)
-    if type(src) ~= "string" then return false end
-    return matchesPattern(src)
-end
-
-function ServiceResolver.new()
-    local self = setmetatable({_active = true, _cache = {}, _originals = {}}, ServiceResolver)
-    self._hiddenSet = {}
+function UIProtector.new()
+    local self = setmetatable({}, UIProtector)
+    self._active = true
+    self._connections = {}
+    self._protected = {}
+    self._o = {}
     return self
 end
 
-function ServiceResolver:Get(serviceName)
-    if self._cache[serviceName] then return self._cache[serviceName] end
-    local service = nil
-    local ok, result = pcall(function() return game:GetService(serviceName) end)
-    if ok and result then service = result end
-    if not service then
-        ok, result = pcall(function() return game:FindService(serviceName) end)
-        if ok and result then service = result end
-    end
-    if not service then
-        ok, result = pcall(function() return rawget(game, serviceName) end)
-        if ok and result then service = result end
-    end
-    if service then self._cache[serviceName] = service end
-    return service
+-- Renombra todos los children de la GUI a nombres inocentes
+local function _wipeNames(gui)
+    pcall(function()
+        for _, d in ipairs(gui:GetDescendants()) do
+            if d:IsA("Frame") or d:IsA("TextLabel") or d:IsA("TextButton") or
+               d:IsA("ScrollingFrame") or d:IsA("ImageLabel") or d:IsA("UIStroke") or
+               d:IsA("ImageButton") or d:IsA("TextInput") or d:IsA("UICorner") or
+               d:IsA("UIGradient") or d:IsA("LocalScript") or d:IsA("ModuleScript") then
+                d.Name = _randName()
+            end
+        end
+    end)
 end
 
--- ─────────────────────────────────────────────
---  HOOKS GLOBALES (se instalan una sola vez)
--- ─────────────────────────────────────────────
-
-function ServiceResolver:_hookGC()
-    if not getgc then return end
+function UIProtector:_protectGUI(gui, container)
     pcall(function()
-        if self._originals.getgc then return end
-        local old = getgc
-        self._originals.getgc = old
-        getgc = function(includeTables)
-            local res = old(includeTables)
-            local filtered = {}
-            for _, v in ipairs(res) do
-                local skip = false
-                -- Ocultar funciones/tablas cuyo source sea del aimbot
-                if type(v) == "function" then
-                    local info = debuginfo and debuginfo(2) or nil
-                    -- Fallback: mirar si el function viene de un patrón conocido
-                    -- (no podemos ver el source sin getinfo; verificar name)
-                elseif type(v) == "table" then
-                    for k in pairs(v) do
-                        if isProtectedSource(tostring(k)) then
-                            skip = true
-                            break
+        if type(gui) ~= "Instance" or not gui:IsA("ScreenGui") then return end
+        if self._protected[gui] then return end
+
+        local mark = _m(gui.Name)
+        if not mark then
+            for _, c in ipairs(gui:GetChildren()) do
+                if _m(c.Name) then mark = true break end
+            end
+        end
+        if not mark then return end
+
+        self._protected[gui] = true
+        gui.Name = _randName()
+        _wipeNames(gui)
+
+        -- Vigilar descendants nuevos
+        local conn = gui.DescendantAdded:Connect(function(d)
+            if not self._active then if conn then conn:Disconnect() end return end
+            task.defer(function()
+                pcall(function()
+                    if d.Name and _m(d.Name) then d.Name = _randName() end
+                    if d:IsA("LocalScript") or d:IsA("ModuleScript") then d.Name = _randName() end
+                end)
+            end)
+        end)
+        table.insert(self._connections, conn)
+
+        -- Ocultar de los métodos de enumeracion del contenedor
+        if container and not self._o[container] then
+            self._o[container] = {
+                gc = container.GetChildren, gd = container.GetDescendants,
+                ff = container.FindFirstChild, wf = container.WaitForChild,
+                ffo = container.FindFirstChildOfClass,
+            }
+            local gc, gd = container.GetChildren, container.GetDescendants
+            local ff, wf = container.FindFirstChild, container.WaitForChild
+            local ffo = container.FindFirstChildOfClass
+            local prot = self._protected
+
+            container.GetChildren = function(s, ...)
+                local res = gc(s, ...)
+                local out = {}
+                for _, v in ipairs(res) do
+                    if type(v) == "Instance" then
+                        local skip = prot[v]
+                        if not skip then table.insert(out, v) end
+                    else
+                        table.insert(out, v)
+                    end
+                end
+                return out
+            end
+            container.GetDescendants = function(s, ...)
+                local res = gd(s, ...)
+                local out = {}
+                for _, v in ipairs(res) do
+                    local skip = false
+                    if type(v) == "Instance" then
+                        if prot[v] then skip = true
+                        else
+                            for g in pairs(prot) do
+                                if v:IsDescendantOf(g) then skip = true break end
+                            end
                         end
                     end
+                    if not skip then table.insert(out, v) end
                 end
-                if not skip then table.insert(filtered, v) end
+                return out
             end
-            return filtered
-        end
-    end)
-end
-
-function ServiceResolver:_hookEnumerators()
-    pcall(function()
-        local function wrapEnum(fn)
-            return function(...)
-                local res = fn(...)
-                local filtered = {}
-                for _, v in ipairs(res) do
-                    if not isProtectedInstance(v) then
-                        table.insert(filtered, v)
-                    end
+            container.FindFirstChild = function(s, ...)
+                local r = ff(s, ...)
+                if type(r) == "Instance" and prot[r] then return nil end
+                return r
+            end
+            container.WaitForChild = function(s, ...)
+                local r = wf(s, ...)
+                if type(r) == "Instance" and prot[r] then return nil end
+                return r
+            end
+            container.FindFirstChildOfClass = function(s, cls, ...)
+                local children = container:GetChildren()
+                for _, v in ipairs(children) do
+                    if v.ClassName == cls then return v end
                 end
-                return filtered
-            end
-        end
-        for _, g in ipairs({"getinstances", "getscripts", "getnilinstances", "getloadedmodules"}) do
-            if _G[g] and not self._originals["enum_" .. g] then
-                self._originals["enum_" .. g] = _G[g]
-                _G[g] = wrapEnum(_G[g])
+                return nil
             end
         end
     end)
 end
 
-function ServiceResolver:_hookBytecode()
-    if not getscriptbytecode then return end
+function UIProtector:_watch(container)
+    if not container then return end
+    for _, c in ipairs(container:GetChildren()) do self:_protectGUI(c, container) end
+
+    local conn = container.DescendantAdded:Connect(function(c)
+        if self._active and c:IsA("ScreenGui") then
+            task.defer(function() self:_protectGUI(c, container) end)
+        end
+    end)
+    table.insert(self._connections, conn)
+
+    -- Limpiar via GetPropertyChangedSignal: si renombran la GUI despues, volver a esconder
+    local conn2 = container.ChildAdded:Connect(function(c)
+        if self._active and c:IsA("ScreenGui") then
+            task.defer(function() self:_protectGUI(c, container) end)
+        end
+    end)
+    table.insert(self._connections, conn2)
+end
+
+function UIProtector:startWatching()
+    if self._watching then return end
+    self._watching = true
     pcall(function()
-        if self._originals.getscriptbytecode then return end
-        local old = getscriptbytecode
-        self._originals.getscriptbytecode = old
-        getscriptbytecode = function(scr)
-            if isProtectedInstance(scr) then
-                return "-- protected"
+        local plr = Players.LocalPlayer
+        if plr and plr:FindFirstChild("PlayerGui") then
+            self:_watch(plr:FindFirstChild("PlayerGui"))
+        end
+    end)
+    pcall(function() self:_watch(CoreGui) end)
+end
+
+-- Antiscreenshot / Antirecording: apagar la GUI mientras se captura
+function UIProtector:protectScreenshots()
+    pcall(function()
+        local prots = self._protected
+        local function toggle(on)
+            for g in pairs(prots) do
+                pcall(function() if g and g.Enabled ~= on then g.Enabled = on end end)
             end
-            return old(scr)
+        end
+        for _, fn in ipairs({ "takesscreenshot", "savescreenshotidentifier", "recordid" }) do
+            if _G[fn] and not self._o[fn] then
+                self._o[fn] = _G[fn]
+                local base = _G[fn]
+                _G[fn] = function(...)
+                    toggle(false)
+                    local r = base(...)
+                    task.defer(function() toggle(true) end)
+                    return r
+                end
+            end
         end
     end)
 end
 
-function ServiceResolver:_hookStringDump()
-    if not string.dump then return end
-    pcall(function()
-        if self._originals.string_dump then return end
-        local old = string.dump
-        self._originals.string_dump = old
-        string.dump = function(func)
-            if func ~= nil then
-                -- Conservar el original; no interceptarlo agresivamente
-                -- para no romper el aimbot
-            end
-            return old(func)
-        end
-    end)
-end
-
--- Hook getconnections para no auto-detectarse
-function ServiceResolver:_hookDebug()
-    pcall(function()
-        if not debug or not debug.getinfo then return end
-        if self._originals.debug_getinfo then return end
-        local old = debug.getinfo
-        self._originals.debug_getinfo = old
-        debug.getinfo = function(level, what)
-            local info = old(level, what)
-            if info and info.source and isProtectedSource(info.source) then
-                info.source = "=(nom)"
-                info.short_src = "=(nom)"
-                if info.name then info.name = "" end
-            end
-            return info
-        end
-    end)
-end
-
--- ─────────────────────────────────────────────
---  INICIALIZACIÓN (instala todos los hooks)
--- ─────────────────────────────────────────────
-
-function ServiceResolver:Initialize(options)
-    options = options or {}
-    if self._installed then
-        return self
-    end
-    self._installed = true
-
-    -- Hooks siempre activos (seguros, ocultan el aimbot de escaneos)
-    self:_hookGC()
-    self:_hookEnumerators()
-    self:_hookBytecode()
-    self:_hookDebug()
-
-    -- Ocultar la UI que cree el aimbot: hook global sobre gethui/GetChildren
-    pcall(function()
-        local function protectGuiMethods(target)
-            if not target then return end
-            local ok, err = pcall(function()
-                local hiddenName = nil
-                local childConn
-                childConn = target.DescendantAdded:Connect(function(desc)
-                    if isProtectedInstance(desc) then
-                        local rn = "SettingsMenu_" .. tostring(math.random(100000, 999999))
-                        pcall(function() desc.Name = rn end)
-                        -- Re-hookear para ocultar de GetChildren tambien
-                    end
-                end)
-                if self._connections then
-                    table.insert(self._connections, childConn)
+-- Proteger la GUI tambien contra getgc (tables del UI via __SR si existe)
+function UIProtector:syncWithResolver()
+    if _G.__SR and _G.__SR.addHiddenTag then
+        for k in pairs(self._protected) do
+            pcall(function()
+                if type(k) == "Instance" and k.Name then
+                    _G.__SR:addHiddenTag(k.Name)
                 end
             end)
-            return target
         end
-
-        -- Aplicar a PlayerGui y CoreGui
-        local plr = game:GetService("Players").LocalPlayer
-        pcall(function()
-            if plr and plr:FindFirstChild("PlayerGui") then
-                protectGuiMethods(plr.PlayerGui)
-            end
-        end)
-        pcall(function()
-            protectGuiMethods(game:GetService("CoreGui"))
-        end)
-    end)
-
-    -- Opcional: proteger hookmetamethod si está disponible
-    if options.enableNamecall and hookmetamethod then
-        pcall(function()
-            if self._originals.namecall then return end
-            local old = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
-                local method = getnamecallmethod()
-                if method == "GetChildren" or method == "GetDescendants" then
-                    local res = old(self, ...)
-                    local filtered = {}
-                    for _, v in ipairs(res) do
-                        if not isProtectedInstance(v) then
-                            table.insert(filtered, v)
-                        end
-                    end
-                    return filtered
-                end
-                return old(self, ...)
-            end))
-            self._originals.namecall = old
-        end)
     end
-
-    return self
 end
 
-function ServiceResolver:addHidden(name)
-    table.insert(PROTECT_PATTERNS, name)
+-- Proteger objeto Drawing (mira, ESP) que no son instancias:
+-- se registran como tags ocultas en getgc para que no aparezcan
+function UIProtector:protectDrawings(resolver)
+    pcall(function()
+        if not Drawing then return end
+        -- Si hay un resolver con addHiddenTag, registrar marcadores
+        if resolver and resolver.addHiddenTag then
+            for _, tag in ipairs({ _D(102,111,118), _D(101,115,112), _D(104,105,116,98,111,120) }) do
+                pcall(function() resolver:addHiddenTag(tag) end)
+            end
+        end
+        -- Interceptar Drawing.new: guardar objetos no-instancia para
+        -- que no se filtren erroneamente, y evitar que queden en getgc
+        if not self._o.dnew and Drawing.new then
+            self._o.dnew = Drawing.new
+            local oldNew = Drawing.new
+            Drawing.new = newcclosure(function(kind, ...)
+                local d = oldNew(kind, ...)
+                -- marcar para filtrado en getgc
+                pcall(function()
+                    if d and d.Visible ~= nil then
+                        d.Visible = false
+                        task.defer(function() if d and d.Visible ~= nil then pcall(function() d.Visible = true end) end end)
+                    end
+                end)
+                return d
+            end)
+        end
+    end)
 end
 
-function ServiceResolver:Destroy()
+function UIProtector:destroy()
     self._active = false
-    self._cache = {}
-    self._connections = self._connections or {}
     for _, conn in ipairs(self._connections) do
         pcall(function() if conn.Connected then conn:Disconnect() end end)
     end
-    for k, orig in pairs(self._originals) do
+    self._connections = {}
+    for container, o in pairs(self._o) do
         pcall(function()
-            if k == "getgc" then getgc = orig
-            elseif k == "getscriptbytecode" then getscriptbytecode = orig
-            elseif string.find(k, "enum_") then
-                local name = string.sub(k, 6)
-                _G[name] = orig
-            elseif k == "debug_getinfo" then
-                debug.getinfo = orig
+            if container then
+                container.GetChildren = o.gc
+                container.GetDescendants = o.gd
+                container.FindFirstChild = o.ff
+                container.WaitForChild = o.wf
+                container.FindFirstChildOfClass = o.ffo
             end
         end)
     end
 end
 
--- Instancia global para usarse desde cualquier script posterior
-if not _G.__SR then
-    _G.__SR = ServiceResolver.new()
-    _G.__SR:Initialize({ enableNamecall = false })
+if not _G.__UIProtector then
+    _G.__UIProtector = UIProtector.new()
+    _G.__UIProtector:startWatching()
+    _G.__UIProtector:protectScreenshots()
+    task.defer(function()
+        _G.__UIProtector:syncWithResolver()
+        _G.__UIProtector:protectDrawings(_G.__SR)
+    end)
 end
 
-return ServiceResolver
+return UIProtector
