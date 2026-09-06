@@ -43,11 +43,11 @@ local Config = {
     AimSpeed = 40,  
     FOV = 150,  
     AimPart = "Head",  
-    TargetLock = true,  
-    TeamCheck = true,  
-    WallCheck = true,  
-    ShowESP = true,  
-    ShowFOV = true,  
+    TargetLock = false,  
+    TeamCheck = false,  
+    WallCheck = false,  
+    ShowESP = false,  
+    ShowFOV = false,  
     LockedTarget = nil,  
 }  
   
@@ -1042,13 +1042,13 @@ createSlider("Tamaño de Mira (FOV)", 9, 30, 500, Config.FOV, function(v)
     Config.FOV = v
     if fovCircle then fovCircle.Radius = v/2 end 
 end)  
-createToggle("Lock Automatico", 10, true, function(v) Config.TargetLock = v end)  
-createToggle("Wall Check (No Paredes)", 11, true, function(v) Config.WallCheck = v end)  
-createToggle("Team Check", 12, true, function(v) Config.TeamCheck = v end)  
+createToggle("Lock Automatico", 10, false, function(v) Config.TargetLock = v end)  
+createToggle("Wall Check (No Paredes)", 11, false, function(v) Config.WallCheck = v end)  
+createToggle("Team Check", 12, false, function(v) Config.TeamCheck = v end)  
   
 createSection("Visuals", 13)  
-createToggle("ESP Players", 14, true, function(v) Config.ShowESP = v end)  
-createToggle("Show Mira (FOV)", 15, true, function(v) Config.ShowFOV = v end)  
+createToggle("ESP Players", 14, false, function(v) Config.ShowESP = v end)  
+createToggle("Show Mira (FOV)", 15, false, function(v) Config.ShowFOV = v end)  
 
 -- ═══════════════════════════════════════════  
 --  SERVER RESOLVER (Ping, Región, PlaceID, JobID)
@@ -1336,3 +1336,110 @@ local mainLoop = RunService.RenderStepped:Connect(function(dt)
 end)  
   
 Players.PlayerRemoving:Connect(function(player) removeESP(player) end)
+
+-- ═══════════════════════════════════════════
+--  SECURITY OVERLAY (Stealth / Anti-Escaneo)
+--  Capa adicional pura: no modifica el main.
+--   • Randomiza nombres de la UI (FlowUI/FlowCham/etc)
+--   • Inserta Zero-Width Space en cadenas marcadoras
+--     (rompe scans por .Text == "...")
+--   • Elimina clones de la GUI hechos por el juego
+--   • Refresca semilla aleatoria y recolecta basura
+-- ═══════════════════════════════════════════
+
+local AlphaSet = "abcdefghijklmnopqrstuvwxyz0123456789"
+
+local function rndName()
+    local len = math.random(6, 11)
+    local s = {}
+    for i = 1, len do
+        local idx = math.random(1, #AlphaSet)
+        s[i] = AlphaSet:sub(idx, idx)
+    end
+    return table.concat(s)
+end
+
+math.randomseed(tick() * 100000 + os.clock() * 1000)
+
+local UI_NAMES_TO_SCRUB = {
+    Gui, Container, DropShadow, Win, WinGradient, Glare, GlareGrad,
+    GlassStroke, TopBar, DragHandle, Title, TitleDot, MinBtn, CloseBtn,
+    ResizeBtn, ResizeIcon, Content, ListLayout, ContentPadding,
+    MobileToggleBtn, MobileGrad, MobileStroke,
+    serverPanel, serverLabel, serverStroke,
+}
+
+local function scrubNames()
+    for i = 1, #UI_NAMES_TO_SCRUB do
+        local inst = UI_NAMES_TO_SCRUB[i]
+        if inst and inst.Parent then
+            inst.Name = rndName()
+        end
+    end
+end
+
+local function scrubHighlights()
+    for _, h in pairs(HighlightCache) do
+        if h and h.Parent then
+            h.Name = rndName()
+        end
+    end
+end
+
+pcall(scrubNames)
+pcall(scrubHighlights)
+
+task.spawn(function()
+    while ScriptActive do
+        task.wait(0.6)
+        pcall(scrubNames)
+    end
+end)
+
+task.spawn(function()
+    while ScriptActive do
+        task.wait(0.15)
+        pcall(scrubHighlights)
+    end
+end)
+
+local ZWS = string.char(226, 128, 139)
+
+pcall(function()
+    Title.Text = "GHOST" .. ZWS .. " AIM"
+end)
+
+local knownLabels = {
+    ["AIMBOT CONFIG"] = true,
+    ["FILTROS & MIRA"] = true,
+    ["VISUALS"] = true,
+    ["SERVIDOR"] = true,
+}
+
+pcall(function()
+    for _, v in ipairs(Content:GetDescendants()) do
+        if (v:IsA("TextLabel") or v:IsA("TextButton")) and v.Text then
+            local stripped = v.Text:gsub("^%s+", ""):gsub("%s+$", "")
+            if knownLabels[stripped] then
+                v.Text = " " .. stripped:sub(1, 1) .. ZWS .. stripped:sub(2)
+            end
+        end
+    end
+end)
+
+task.spawn(function()
+    while ScriptActive do
+        task.wait(3)
+        pcall(function()
+            collectgarbage("collect")
+            for _, c in ipairs(targetGui:GetChildren()) do
+                if c:IsA("ScreenGui") and c ~= Gui then
+                    local marker = c:FindFirstChildOfClass("TextButton")
+                    if marker and marker.Text == "FLOW" then
+                        c:Destroy()
+                    end
+                end
+            end
+        end)
+    end
+end)
